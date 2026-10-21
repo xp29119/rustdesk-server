@@ -332,7 +332,8 @@ class Cases:
     def udp_roundtrip(self, payload, expected):
         self.peer.sendto(payload, (SERVER, self.s.port))
         data, addr = self.peer.recvfrom(65536)
-        require(addr == (SERVER, self.s.port), "UDP reply source mismatch")
+        require(addr == (SERVER, self.s.port),
+                f"UDP reply source mismatch: expected {(SERVER, self.s.port)}, received {addr}")
         return envelope(data, expected)[1]
 
     def heartbeat(self):
@@ -569,6 +570,39 @@ def sha256(path):
     return h.hexdigest()
 
 
+def verify_udp_fixture():
+    """Check wildcard-server source selection before exercising the hbbs protocol."""
+    checked = []
+    for family in (socket.AF_INET, socket.AF_INET6):
+        server = None
+        try:
+            server = socket.socket(family, socket.SOCK_DGRAM)
+            if family == socket.AF_INET6:
+                server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            server.bind(("0.0.0.0" if family == socket.AF_INET else "::", 0))
+        except OSError:
+            if server:
+                server.close()
+            # hbbs also falls back to IPv4 when an IPv6 dual-stack listener is unavailable.
+            if family == socket.AF_INET6:
+                continue
+            raise
+        with server, udp_socket() as client:
+            server.settimeout(TIMEOUT)
+            port = server.getsockname()[1]
+            challenge = secrets.token_bytes(16)
+            client.sendto(challenge, (SERVER, port))
+            request, peer = server.recvfrom(128)
+            require(request == challenge, "UDP fixture request payload mismatch")
+            server.sendto(request, peer)
+            response, source = client.recvfrom(128)
+            require(response == challenge, "UDP fixture response payload mismatch")
+            require(source == (SERVER, port),
+                    f"UDP fixture preferred source failed: expected {(SERVER, port)}, received {source}")
+            checked.append("IPv4" if family == socket.AF_INET else "IPv6 dual-stack")
+    return checked
+
+
 def assert_and_setup_namespace(parent_inode):
     require(sys.platform == "linux", "real integration requires Linux network namespaces")
     require(os.readlink("/proc/self/ns/net") != parent_inode, "refusing unchanged host network namespace")
@@ -585,12 +619,26 @@ def assert_and_setup_namespace(parent_inode):
             "private namespace unexpectedly has non-loopback interfaces")
     for argv in ([ip, "link", "set", "lo", "up"],
                  [ip, "addr", "add", SERVER + "/32", "dev", "lo"],
-                 [ip, "addr", "add", CLIENT + "/32", "dev", "lo"]):
+                 [ip, "addr", "add", CLIENT + "/32", "dev", "lo"],
+                 # With both aliases on lo, an unconnected wildcard UDP socket otherwise
+                 # prefers CLIENT as its source when replying to CLIENT's local route.
+                 [ip, "route", "replace", "local", CLIENT + "/32", "dev", "lo",
+                  "src", SERVER, "table", "local"]):
         subprocess.run(argv, check=True, stdin=subprocess.DEVNULL, capture_output=True)
     routes = subprocess.run([ip, "-j", "route", "show", "table", "main"],
                             check=True, capture_output=True, text=True)
     require(all(r.get("dev") == "lo" and r.get("dst") != "default"
                 for r in json.loads(routes.stdout)), "private namespace has an unexpected outbound route")
+    selected = subprocess.run([ip, "-j", "route", "get", CLIENT],
+                              check=True, capture_output=True, text=True)
+    selected = json.loads(selected.stdout)
+    require(len(selected) == 1 and selected[0].get("type") == "local"
+            and selected[0].get("dev") == "lo" and selected[0].get("prefsrc") == SERVER,
+            "UDP fixture route must be local on lo with the server preferred source")
+    checked = verify_udp_fixture()
+    print("PASS isolated wildcard UDP fixture: " + ", ".join(checked), flush=True)
+    return {"route_to_client": "local via lo", "preferred_udp_source": SERVER,
+            "wildcard_udp_roundtrips": checked}
 
 
 def self_check():
@@ -608,10 +656,11 @@ def self_check():
 
 
 def run(args):
-    assert_and_setup_namespace(args._parent_netns)
+    fixture = assert_and_setup_namespace(args._parent_netns)
     report = {"schema": 1, "real_server_process": False, "actualClient": False,
               "started_at_unix": time.time(), "isolation": "new Linux netns; only lo; no outbound route",
               "test_client_source": "independent Python/PyNaCl client",
+              "network_fixture": fixture,
               "official_client_reference_commit": SOURCE_COMMIT,
               "account_token_origin": "synthetic", "hbbs_validates_account_token": False,
               "binaries": {"hbbs_sha256": sha256(args.hbbs), "hbbr_sha256": sha256(args.hbbr)},

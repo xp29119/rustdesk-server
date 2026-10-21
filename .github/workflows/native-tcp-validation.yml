@@ -53,6 +53,15 @@ jobs:
         run: |
           mkdir -p validation-results
           sudo "$PWD/.test-venv/bin/python" validation/protocol_blackbox.py --hbbs "$PWD/target/release/hbbs" --hbbr "$PWD/target/release/hbbr" --report "$PWD/validation-results/protocol-blackbox-result.json" --keep-logs
+      - name: Make synthetic validation evidence readable to the runner
+        if: always()
+        run: |
+          if [ -d validation-results ]; then
+            sudo chown -R "$(id -u):$(id -g)" validation-results
+          fi
+          if [ -f validation-results/protocol-blackbox-result.json ]; then
+            cat validation-results/protocol-blackbox-result.json
+          fi
       - name: Package validated executables
         run: |
           mkdir -p dist

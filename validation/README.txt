@@ -47,6 +47,18 @@ DNS configuration, external interface, or outbound route. The two non-127 IPs on
 lo are necessary: official hbbr and the hbbs NAT/online port interpret a 127/8
 source as a text management command, not the native client protocol.
 
+Because both addresses are local aliases, the CLIENT local route is explicitly
+given SERVER as its preferred source inside the new namespace:
+  ip route replace local 10.203.0.2/32 dev lo src 10.203.0.1 table local
+This is a local-table /32 route, not a main/default route or an external path. It
+prevents the kernel from selecting CLIENT as the source of the wildcard hbbs UDP
+socket's replies. Before starting either server, the harness checks `ip -j route
+get 10.203.0.2` resolves to type=local, dev=lo, prefsrc=10.203.0.1, then runs an
+independent UDP request/reply probe using an unconnected wildcard server socket.
+IPv4 is mandatory; IPv6 dual-stack is also checked when it can be bound. The probe
+verifies the exact response source address and payload. Its results are recorded
+in network_fixture. The native protocol source-address assertions remain strict.
+
 Base port is 32116, overridable using --port (must be unprivileged). Ports inside
 the namespace: hbbs UDP/TCP p, NAT/online p-1, hbbs WS p+2, hbbr TCP p+1, WS p+3.
 WebSockets are not exercised by this suite. Generated private keys, SQLite data,
