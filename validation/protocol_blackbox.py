@@ -572,10 +572,17 @@ def sha256(path):
 def assert_and_setup_namespace(parent_inode):
     require(sys.platform == "linux", "real integration requires Linux network namespaces")
     require(os.readlink("/proc/self/ns/net") != parent_inode, "refusing unchanged host network namespace")
-    require({p.name for p in Path("/sys/class/net").iterdir()} == {"lo"},
-            "private namespace unexpectedly has non-loopback interfaces")
     ip = shutil.which("ip")
     require(ip is not None, "iproute2 is required")
+    # sysfs can retain the network-namespace view from when it was mounted.
+    # A fresh rtnetlink query inspects this process's current network namespace.
+    links = subprocess.run([ip, "-j", "link", "show"],
+                           check=True, capture_output=True, text=True)
+    interfaces = json.loads(links.stdout)
+    require(isinstance(interfaces, list) and len(interfaces) == 1
+            and interfaces[0].get("ifname") == "lo"
+            and interfaces[0].get("link_type") == "loopback",
+            "private namespace unexpectedly has non-loopback interfaces")
     for argv in ([ip, "link", "set", "lo", "up"],
                  [ip, "addr", "add", SERVER + "/32", "dev", "lo"],
                  [ip, "addr", "add", CLIENT + "/32", "dev", "lo"]):
